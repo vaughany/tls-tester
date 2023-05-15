@@ -1,0 +1,5 @@
+*.backup
+*.csv
+*.txt
+bin/
+dist/

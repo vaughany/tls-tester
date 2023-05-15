@@ -98,6 +98,7 @@ This is a basic tool, reporting only basic results. The results are neither defi
 ## Version History
 
 * **2022-05-15, v0.1:** initial release. Scans four common URLs by default or use `-url` to scan a URL of your choice.
+* **2022-05-15, v0.2:** used goroutines and waitgroups to run the four TLS version tests concurrently-per-URL, significantly reducing the testing time.
 
 ---
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,10 +22,18 @@ var urls = []string{
 
 type Result int
 
-type TLSResult struct {
+type URLTestResult struct {
 	tls10, tls11, tls12, tls13                 Result
 	tls10note, tls11note, tls12note, tls13note string
 }
+
+const (
+	resultUnknown Result = iota
+	resultSupportedOkay
+	resultSupportedNotOkay
+	resultUnsupportedOkay
+	resultUnsupportedNotOkay
+)
 
 var (
 	versionsStrings = map[uint16]string{
@@ -58,9 +67,16 @@ var (
 		resultUnsupportedNotOkay: `❌`,
 	}
 
-	plural string
+	// Where we'll store all the results of the tests until we're ready to display it or write it out.
+	TestResults      = make(map[string]URLTestResult)
+	TestResultsMutex = sync.RWMutex{}
 
 	jar *cookiejar.Jar
+	fh  *os.File
+	err error
+
+	plural  string
+	numJobs int
 )
 
 const (
@@ -77,15 +93,11 @@ const (
 	testNotATLSHandshake          = `first record does not look like a TLS handshake`
 	testHTTPResponse              = `server gave HTTP response to HTTPS client`
 
-	resultUnknown Result = iota
-	resultSupportedOkay
-	resultSupportedNotOkay
-	resultUnsupportedOkay
-	resultUnsupportedNotOkay
+	workers = 10
 )
 
 func main() {
-	fmt.Println("TLS Tester v0.2")
+	fmt.Println("TLS Tester v0.3")
 
 	// Flags.
 	url := flag.String(`url`, ``, `URL to test (e.g. 'google.com')`)
@@ -94,30 +106,23 @@ func main() {
 		urls = []string{*url}
 	}
 
+	// Put the number of URLs to be tested into a variable as we use it in several places for output and channel size.
+	numJobs = len(urls)
+
 	// What we're doing, and pluralising the output if needs be (I *hate* e.g. '1 URLs').
-	if len(urls) > 1 {
+	if numJobs > 1 {
 		plural = `s`
 	}
-	fmt.Printf("Checking %d URL%s for TLS security\n", len(urls), plural)
+	fmt.Printf("Checking %d URL%s for TLS security\n", numJobs, plural)
 
 	startupTime := time.Now()
 
-	// Open a file for writing.
-	fh, err := os.Create(`./output.csv`)
+	// Open a file for writing now and quit early if it fails.
+	fh, err = os.Create(`./output.csv`)
 	if err != nil {
 		panic(err)
 	}
 	defer fh.Close()
-
-	// Writing the 'header' of the CSV file.
-	csvLine := fmt.Sprintf("URL,%s,%s,%s,%s,%s note,%s note,%s note,%s note\n",
-		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
-		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
-	)
-	_, err = fh.WriteString(csvLine)
-	if err != nil {
-		panic(err)
-	}
 
 	// Set up a new cookie jar (some websites fail if a cookie cannot be written and then read back).
 	jar, err = cookiejar.New(nil)
@@ -125,14 +130,48 @@ func main() {
 		panic(err)
 	}
 
-	for i, url := range urls {
-		fmt.Printf("% 5d: %50s:\t\t", i+1, url)
+	// Set up the jobs and results channels.
+	jobs := make(chan string, numJobs)
+	results := make(chan string, numJobs)
+
+	// Spin up some workers.
+	for w := 1; w <= workers; w++ {
+		go processURL(w, jobs, results)
+	}
+
+	// Send the jobs.
+	for _, url := range urls {
+		jobs <- url
+	}
+	close(jobs)
+
+	// Receive the results.
+	for a := 1; a <= numJobs; a++ {
+		<-results
+	}
+
+	fmt.Printf("Processing complete.\n\n")
+
+	// Write out the data to screen, CSV, wherever.
+	var wg sync.WaitGroup
+
+	wg.Add(2)
+	writeScreen(TestResults, &wg)
+	writeCSV(TestResults, &wg)
+	wg.Wait()
+
+	fmt.Printf("Done. Tested %d URL%s in %s.\n", numJobs, plural, time.Since(startupTime).Round(time.Millisecond))
+}
+
+func processURL(id int, jobs <-chan string, results chan<- string) {
+	for url := range jobs {
+		fmt.Printf("    Processing %s...\n", url)
 
 		// Set up a waitgroup for the four TLS version tests.
 		var wg sync.WaitGroup
 
 		// Set defaults for the output.
-		testResult := TLSResult{resultUnknown, resultUnknown, resultUnknown, resultUnknown, ``, ``, ``, ``}
+		testResult := URLTestResult{resultUnknown, resultUnknown, resultUnknown, resultUnknown, ``, ``, ``, ``}
 
 		for _, tlsVersion := range []uint16{tls.VersionTLS10, tls.VersionTLS11, tls.VersionTLS12, tls.VersionTLS13} {
 			wg.Add(1)
@@ -142,33 +181,15 @@ func main() {
 		// Wait for all the tests to complete.
 		wg.Wait()
 
-		// Basic 'tick', 'cross' or 'unknown' output for the screen.
-		fmt.Printf("%s %s %s %s\n", resultsIcons[testResult.tls10], resultsIcons[testResult.tls11], resultsIcons[testResult.tls12], resultsIcons[testResult.tls13])
+		TestResultsMutex.Lock()
+		TestResults[url] = testResult
+		TestResultsMutex.Unlock()
 
-		// Create one line of the CSV file from the results and notes of this URL's test.
-		csvLine := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
-			url,
-			resultsShortStrings[testResult.tls10],
-			resultsShortStrings[testResult.tls11],
-			resultsShortStrings[testResult.tls12],
-			resultsShortStrings[testResult.tls13],
-			testResult.tls10note,
-			testResult.tls11note,
-			testResult.tls12note,
-			testResult.tls13note,
-		)
-
-		// Write this URL's tests out to the CSV file.
-		_, err := fh.WriteString(csvLine)
-		if err != nil {
-			panic(err)
-		}
+		results <- url
 	}
-
-	fmt.Printf("Done. Tested %d URL%s in %s.\n", len(urls), plural, time.Since(startupTime).Round(time.Millisecond))
 }
 
-func testTLSVersion(tlsVersion uint16, url string, testResult *TLSResult, wg *sync.WaitGroup) {
+func testTLSVersion(tlsVersion uint16, url string, testResult *URLTestResult, wg *sync.WaitGroup) {
 	defer wg.Done()
 
 	var (
@@ -178,7 +199,7 @@ func testTLSVersion(tlsVersion uint16, url string, testResult *TLSResult, wg *sy
 
 	client := &http.Client{
 		Jar:     jar,
-		Timeout: 3 * time.Second,
+		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				MinVersion: tlsVersion,
@@ -278,5 +299,64 @@ func testTLSVersion(tlsVersion uint16, url string, testResult *TLSResult, wg *sy
 	case tls.VersionTLS13:
 		testResult.tls13 = tlsURLResult
 		testResult.tls13note = tlsURLNote
+	}
+}
+
+// Basic 'tick', 'cross' or 'unknown' output for the screen.
+func writeScreen(results map[string]URLTestResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// Sort the data via the keys.
+	keys := make([]string, 0, len(results))
+	for key := range results {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for i, key := range keys {
+		fmt.Printf("% 5d: %50s:\t\t%s %s %s %s\n", i+1, key, resultsIcons[results[key].tls10], resultsIcons[results[key].tls11], resultsIcons[results[key].tls12], resultsIcons[results[key].tls13])
+	}
+}
+
+func writeCSV(results map[string]URLTestResult, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	// Writing the 'header' of the CSV file.
+	csvLine := fmt.Sprintf("URL,%s,%s,%s,%s,%s note,%s note,%s note,%s note\n",
+		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
+		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
+	)
+	_, err := fh.WriteString(csvLine)
+	if err != nil {
+		panic(err)
+	}
+
+	keys := make([]string, 0, len(results))
+	for key := range results {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	// Create one line of the CSV file from the results and notes of this URL's test.
+	for _, key := range keys {
+		// fmt.Printf("% 5d: %50s:\t\t%s %s %s %s\n", i+1, key, resultsIcons[results[key].tls10], resultsIcons[results[key].tls11], resultsIcons[results[key].tls12], resultsIcons[results[key].tls13])
+
+		csvLine = fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+			key,
+			resultsShortStrings[results[key].tls10],
+			resultsShortStrings[results[key].tls11],
+			resultsShortStrings[results[key].tls12],
+			resultsShortStrings[results[key].tls13],
+			results[key].tls10note,
+			results[key].tls11note,
+			results[key].tls12note,
+			results[key].tls13note,
+		)
+
+		// Write this URL's tests out to the CSV file.
+		_, err = fh.WriteString(csvLine)
+		if err != nil {
+			panic(err)
+		}
 	}
 }

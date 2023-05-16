@@ -19,13 +19,16 @@ TLS Tester connects to a given URL with all four versions of TLS and logs the re
 ## Using a pre-built binary
 
 1. [Download a binary](https://github.com/vaughany/tls-tester/releases) for Linux or Windows.
-2. Run it with e.g. `./tls-tester` or `tls-tester.exe`
+2. Make it executable 
+   * Linux: `chmod +x tls-tester`
+   * Windows: right-click on it, Properties, Unblock (IIRC).
+3. Run it with e.g. `./tls-tester` or `tls-tester.exe`
 
 ---
 
 ## Command-line Options 
 
-By default, the program will scan four common URLs.  Run the command with `-url your-domain.com` to scan a URL of your choice.
+By default, the program will scan four common URLs, purely for example.  Run the command with `-url your-domain.com` to scan a URL of your choice.
 
 Run the command with `-h` for help.
 
@@ -38,17 +41,29 @@ Typical on-screen output looks like this, with the URL being tested and the resu
 Remember that ideally, we want to see TLS 1.2 or 1.3, and **do not want** to see TLS 1.0 or 1.1.
 
 ```bash
-TLS Tester v0.1
+TLS Tester v0.3
 Checking 4 URLs for TLS security
-  1:     apple.com:  ✅ ✅ ✅ ✅
-  2:  facebook.com:  ❌ ❌ ✅ ✅
-  3:    google.com:  ❌ ❌ ✅ ✅
-  4:   twitter.com:  ✅ ✅ ✅ ✅
-                      |  |  |  |
-                      |  |  |  +- TLS 1.3
-                      |  |  +---- TLS 1.2
-                      |  +------- TLS 1.1
-                      +---------- TLS 1.0
+    Processing apple.com...
+    Processing facebook.com...
+    Processing google.com...
+    Processing twitter.com...
+Processing complete.
+
+    1:     apple.com:  ✅ ✅ ✅ ✅
+    2:  facebook.com:  ❌ ❌ ✅ ✅
+    3:    google.com:  ❌ ❌ ✅ ✅
+    4:   twitter.com:  ✅ ✅ ✅ ✅
+Done. Tested 4 URLs in 533ms.
+```
+
+The icons indicate:
+
+```bash
+                        |  |  |  |
+                        |  |  |  +- TLS 1.3
+                        |  |  +---- TLS 1.2
+                        |  +------- TLS 1.1
+                        +---------- TLS 1.0
 ```
 
 * If TLS 1.0 or 1.1 are in use, a ❌ is shown in that column.
@@ -99,9 +114,10 @@ This is a basic tool, reporting only basic results. The results are neither defi
 
 * **2022-05-15, v0.1:** initial release. Scans four common URLs by default or use `-url` to scan a URL of your choice.
 * **2022-05-15, v0.2:** used goroutines and waitgroups to run the four TLS version tests concurrently-per-URL, significantly reducing the testing time.
+* **2022-05-16, v0.3:** refactored the code to use multiple (10) workers / queues, so the process can be completed much faster if scanning many URLs.
 
 ---
 
 ## To-Do
 
-1. Refactor the code to use multiple workers / queues, so the process can be completed much faster if scanning many URLs.
+1. Percentages of TLS version use

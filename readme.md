@@ -41,19 +41,21 @@ Typical on-screen output looks like this, with the URL being tested and the resu
 Remember that ideally, we want to see TLS 1.2 or 1.3, and **do not want** to see TLS 1.0 or 1.1.
 
 ```bash
-TLS Tester v0.3
+TLS Tester v0.4
 Checking 4 URLs for TLS security
+Starting web server on http://localhost:8080
     Processing apple.com...
-    Processing facebook.com...
-    Processing google.com...
     Processing twitter.com...
+    Processing google.com...
+    Processing facebook.com...
 Processing complete.
 
     1:     apple.com:  ✅ ✅ ✅ ✅
     2:  facebook.com:  ❌ ❌ ✅ ✅
     3:    google.com:  ❌ ❌ ✅ ✅
     4:   twitter.com:  ✅ ✅ ✅ ✅
-Done. Tested 4 URLs in 533ms.
+
+Done. Tested 4 URLs in 688ms. Check the website on http://localhost:8080 for details.
 ```
 
 The icons indicate:
@@ -101,12 +103,26 @@ twitter.com,okay,okay,okay,okay,protocol version not supported,protocol version 
 
 ---
 
+## Web Output
+
+When run, the program will attempt to start a very basic web server on http://localhost:8080 (the on-screen output will mention this both at startup and at the end of the scan). It shows the URL, the results of the tests for all four TLS versions, and a complimentary link to [Qualys' SSL Labs](https://www.ssllabs.com/) with the URL pre-filled, should you want to test your URLs further.
+
+If you test a large number of URLs, they should appear on the web page as soon as that URL has been fully tested. Simply hit refresh on your browser to update it.
+
+The page is formatted using minimal [Bootstrap](https://getbootstrap.com) markup, and pulls the required CSS and JS from a CDN. The page will look much more basic without it.
+
+The CSV data is also available to copy and paste elsewhere, via the web: http://localhost:8080/csv.
+
+Press `Ctrl-C` to quit.
+
+---
+
 ## Double checking
 
 This is a basic tool, reporting only basic results. The results are neither definitive or conclusive, and errors especially may be the results of timeouts due to slow-running Internet between you and the target, as well as more mundane things. Looking deeper into your security is highly recommended.
 
 1. If you're on Linux or MacOS, I suggest downloading `testssl.sh` from [testssl.sh](https://testssl.sh/) and testing your domains against it.  
-2. Alternatively, use SSL Labs' [SSl Test](https://www.ssllabs.com/ssltest/) (but remember to tick the 'keep results private' box).
+2. Alternatively, use [Qualys' SSL Labs SSL Tester](https://www.ssllabs.com/ssltest/) (but remember to tick the 'keep results private' box).
 
 ---
 
@@ -115,9 +131,12 @@ This is a basic tool, reporting only basic results. The results are neither defi
 * **2022-05-15, v0.1:** initial release. Scans four common URLs by default or use `-url` to scan a URL of your choice.
 * **2022-05-15, v0.2:** used goroutines and waitgroups to run the four TLS version tests concurrently-per-URL, significantly reducing the testing time.
 * **2022-05-16, v0.3:** refactored the code to use multiple (10) workers / queues, so the process can be completed much faster if scanning many URLs.
+* **2022-05-17, v0.4:** Now with a web server (http://localhost:8080) for better presentation of the results.
 
 ---
 
 ## To-Do
 
-1. Percentages of TLS version use
+1. Percentages of TLS version use.
+2. Use e.g. `input.csv` file in order to specify multiple URLs to test.
+3. Processing time on the web page.

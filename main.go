@@ -2,8 +2,12 @@ package main
 
 import (
 	"crypto/tls"
+	"embed"
+	"errors"
 	"flag"
 	"fmt"
+	"html/template"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"os"
@@ -93,11 +97,15 @@ const (
 	testNotATLSHandshake          = `first record does not look like a TLS handshake`
 	testHTTPResponse              = `server gave HTTP response to HTTPS client`
 
-	workers = 10
+	workers      = 10
+	webserverURL = "localhost:8080"
 )
 
+//go:embed "templates/results.tmpl"
+var efs embed.FS
+
 func main() {
-	fmt.Println("TLS Tester v0.3")
+	fmt.Println("TLS Tester v0.4")
 
 	// Flags.
 	url := flag.String(`url`, ``, `URL to test (e.g. 'google.com')`)
@@ -124,6 +132,27 @@ func main() {
 	}
 	defer fh.Close()
 
+	var wg sync.WaitGroup
+
+	// Web server.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", rootHandler)
+	mux.HandleFunc("/csv", csvHandler)
+	mux.HandleFunc("/favicon.ico", notFoundHandler) // Prevents browsers hitting the API more than once.
+	wg.Add(1)
+	go func() {
+		fmt.Printf("Starting web server on http://%s\n", webserverURL)
+		err := http.ListenAndServe(webserverURL, mux)
+
+		if errors.Is(err, http.ErrServerClosed) {
+			fmt.Printf("server closed\n")
+		} else if err != nil {
+			fmt.Printf("error starting server: %s\n", err)
+			os.Exit(1)
+		}
+		wg.Done()
+	}()
+
 	// Set up a new cookie jar (some websites fail if a cookie cannot be written and then read back).
 	jar, err = cookiejar.New(nil)
 	if err != nil {
@@ -139,6 +168,9 @@ func main() {
 		go processURL(w, jobs, results)
 	}
 
+	// Wait long enough for the web server startup message to appear.
+	time.Sleep(50 * time.Millisecond)
+
 	// Send the jobs.
 	for _, url := range urls {
 		jobs <- url
@@ -153,14 +185,12 @@ func main() {
 	fmt.Printf("Processing complete.\n\n")
 
 	// Write out the data to screen, CSV, wherever.
-	var wg sync.WaitGroup
-
 	wg.Add(2)
-	writeScreen(TestResults, &wg)
-	writeCSV(TestResults, &wg)
-	wg.Wait()
+	writeScreen(&wg)
+	writeCSV(&wg)
 
-	fmt.Printf("Done. Tested %d URL%s in %s.\n", numJobs, plural, time.Since(startupTime).Round(time.Millisecond))
+	fmt.Printf("\nDone. Tested %d URL%s in %s. Check the website on http://%s for details.\n", numJobs, plural, time.Since(startupTime).Round(time.Millisecond), webserverURL)
+	wg.Wait()
 }
 
 func processURL(id int, jobs <-chan string, results chan<- string) {
@@ -202,8 +232,9 @@ func testTLSVersion(tlsVersion uint16, url string, testResult *URLTestResult, wg
 		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
-				MinVersion: tlsVersion,
-				MaxVersion: tlsVersion,
+				InsecureSkipVerify: false,
+				MinVersion:         tlsVersion,
+				MaxVersion:         tlsVersion,
 			},
 		},
 	}
@@ -303,45 +334,44 @@ func testTLSVersion(tlsVersion uint16, url string, testResult *URLTestResult, wg
 }
 
 // Basic 'tick', 'cross' or 'unknown' output for the screen.
-func writeScreen(results map[string]URLTestResult, wg *sync.WaitGroup) {
+func writeScreen(wg *sync.WaitGroup) {
 	defer wg.Done()
 
-	// Sort the data via the keys.
-	keys := make([]string, 0, len(results))
-	for key := range results {
+	// Set the length of TestResultsKeys based on the number of URLs.
+	keys := make([]string, 0, numJobs)
+
+	// Sort the results' keys.
+	for key := range TestResults {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 
 	for i, key := range keys {
-		fmt.Printf("% 5d: %50s:\t\t%s %s %s %s\n", i+1, key, resultsIcons[results[key].tls10], resultsIcons[results[key].tls11], resultsIcons[results[key].tls12], resultsIcons[results[key].tls13])
+		fmt.Printf("% 5d: %50s:\t\t%s %s %s %s\n", i+1, key, resultsIcons[TestResults[key].tls10], resultsIcons[TestResults[key].tls11], resultsIcons[TestResults[key].tls12], resultsIcons[TestResults[key].tls13])
 	}
 }
 
-func writeCSV(results map[string]URLTestResult, wg *sync.WaitGroup) {
-	defer wg.Done()
+func createCSVString(results map[string]URLTestResult) string {
+	var csvData string
 
-	// Writing the 'header' of the CSV file.
-	csvLine := fmt.Sprintf("URL,%s,%s,%s,%s,%s note,%s note,%s note,%s note\n",
-		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
+	// Create the 'header' of the CSV file.
+	csvData += fmt.Sprintf("#,URL,%[1]s,%[2]s,%[3]s,%[4]s,%[1]s note,%[2]s note,%[3]s note,%[4]s note\n",
 		versionsStrings[tls.VersionTLS10], versionsStrings[tls.VersionTLS11], versionsStrings[tls.VersionTLS12], versionsStrings[tls.VersionTLS13],
 	)
-	_, err := fh.WriteString(csvLine)
-	if err != nil {
-		panic(err)
-	}
 
-	keys := make([]string, 0, len(results))
-	for key := range results {
+	// Set the length of TestResultsKeys based on the number of URLs.
+	keys := make([]string, 0, numJobs)
+
+	// Sort the results' keys.
+	for key := range TestResults {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 
-	// Create one line of the CSV file from the results and notes of this URL's test.
-	for _, key := range keys {
-		// fmt.Printf("% 5d: %50s:\t\t%s %s %s %s\n", i+1, key, resultsIcons[results[key].tls10], resultsIcons[results[key].tls11], resultsIcons[results[key].tls12], resultsIcons[results[key].tls13])
-
-		csvLine = fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+	// Iterate over the data to create a line of comma-separated data.
+	for i, key := range keys {
+		csvData += fmt.Sprintf("%d,%s,%s,%s,%s,%s,%s,%s,%s,%s\n",
+			i+1,
 			key,
 			resultsShortStrings[results[key].tls10],
 			resultsShortStrings[results[key].tls11],
@@ -352,11 +382,81 @@ func writeCSV(results map[string]URLTestResult, wg *sync.WaitGroup) {
 			results[key].tls12note,
 			results[key].tls13note,
 		)
-
-		// Write this URL's tests out to the CSV file.
-		_, err = fh.WriteString(csvLine)
-		if err != nil {
-			panic(err)
-		}
 	}
+
+	return csvData
+}
+
+func writeCSV(wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	csvData := createCSVString(TestResults)
+
+	// Write out the CSV file.
+	_, err = fh.WriteString(csvData)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func csvHandler(w http.ResponseWriter, r *http.Request) {
+	csvData := createCSVString(TestResults)
+
+	// Start doing HTML output things.
+	w.WriteHeader(http.StatusTeapot)             // Force a status.
+	w.Header().Set("Content-Type", "text/plain") // Force a content-type.
+
+	io.WriteString(w, csvData)
+}
+
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	type HTML struct {
+		ID                                         int
+		URL                                        string
+		TLS10, TLS11, TLS12, TLS13                 string
+		TLS10Note, TLS11Note, TLS12Note, TLS13Note string
+	}
+
+	// Variable to hold all the output.
+	htmlOutput := []HTML{}
+
+	// Set the length of TestResultsKeys based on the number of URLs.
+	keys := make([]string, 0, numJobs)
+
+	// Sort the results' keys.
+	for key := range TestResults {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	for i, key := range keys {
+		line := HTML{
+			i + 1,
+			key,
+			resultsShortStrings[TestResults[key].tls10],
+			resultsShortStrings[TestResults[key].tls11],
+			resultsShortStrings[TestResults[key].tls12],
+			resultsShortStrings[TestResults[key].tls13],
+			TestResults[key].tls10note,
+			TestResults[key].tls11note,
+			TestResults[key].tls12note,
+			TestResults[key].tls13note,
+		}
+
+		htmlOutput = append(htmlOutput, line)
+	}
+
+	// Start doing HTML output things.
+	w.WriteHeader(http.StatusTeapot)            // Force a status.
+	w.Header().Set("Content-Type", "text/html") // Force a content-type.
+
+	tmpl := template.Must(template.ParseFS(efs, "templates/*.tmpl"))
+	err = tmpl.Execute(w, htmlOutput)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNotFound)
 }
